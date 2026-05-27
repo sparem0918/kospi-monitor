@@ -1,0 +1,28 @@
+# DART API key (절대 GitHub에 올라가면 안 됨)
+dart_api_key.txt
+
+# 로컬 캐시 (자동 재생성됨)
+corp_codes.json
+fin_cache/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 참고: data/ 폴더는 일별 누적 데이터로 git에 포함시키는 것을 권장 (비교 기능 위해)
+# 만약 데이터를 공개하기 싫으면 아래 주석을 해제
+# data/
