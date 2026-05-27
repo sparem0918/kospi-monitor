@@ -1,0 +1,77 @@
+name: Daily KOSPI Monitor
+
+on:
+  schedule:
+    - cron: '0 8 * * 1-5'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4 lxml pandas
+
+      - name: Restore data cache
+        uses: actions/cache@v4
+        with:
+          path: data
+          key: data-snapshots-${{ github.run_id }}
+          restore-keys: |
+            data-snapshots-
+
+      - name: Restore DART cache
+        uses: actions/cache@v4
+        with:
+          path: fin_cache
+          key: fin-cache-${{ github.run_id }}
+          restore-keys: |
+            fin-cache-
+
+      - name: Set DART API key
+        env:
+          DART_API_KEY: ${{ secrets.DART_API_KEY }}
+        run: |
+          if [ -n "$DART_API_KEY" ]; then
+            echo "$DART_API_KEY" > dart_api_key.txt
+            echo "DART API key configured."
+          else
+            echo "No DART API key. Auto-scoring will be skipped."
+          fi
+
+      - name: Run KOSPI monitor
+        env:
+          DART_API_KEY: ${{ secrets.DART_API_KEY }}
+        run: |
+          echo "" | python kospi_check.py || true
+
+      - name: Commit and push results
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git commit -m "Auto update: $(date -u +'%Y-%m-%d %H:%M UTC')"
+          git push
+
+      - name: Cleanup sensitive files
+        if: always()
+        run: rm -f dart_api_key.txt
