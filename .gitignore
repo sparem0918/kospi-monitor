@@ -3,7 +3,7 @@ dart_api_key.txt
 
 # 로컬 캐시 (자동 재생성됨)
 corp_codes.json
-fin_cache/
+#fin_cache/
 
 # Python
 __pycache__/
