@@ -55,8 +55,11 @@ jobs:
           fi
 
       - name: Run KOSPI monitor
+        timeout-minutes: 8
         env:
           DART_API_KEY: ${{ secrets.DART_API_KEY }}
+          CI: "true"
+          PYTHONUNBUFFERED: "1"
         run: |
           echo "" | python kospi_check.py || true
 
