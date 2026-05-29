@@ -55,7 +55,7 @@ jobs:
           fi
 
       - name: Run KOSPI monitor
-        timeout-minutes: 8
+        timeout-minutes: 20
         env:
           DART_API_KEY: ${{ secrets.DART_API_KEY }}
           CI: "true"
