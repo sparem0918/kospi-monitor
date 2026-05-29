@@ -1,4 +1,8 @@
 # -*- coding: utf-8 -*-
+import os, sys, builtins
+# GitHub Actions 등 비대화형 환경에서는 input() 즉시 빈 문자열 반환
+if os.environ.get("CI") or not sys.stdin.isatty():
+    builtins.input = lambda prompt="": ""
 """
 KOSPI Top 100 일일 모니터링 v3.0
 - 데이터: 네이버 금융 + DART (optional)
