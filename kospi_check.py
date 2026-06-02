@@ -62,7 +62,7 @@ HEADERS = {
 # ===== 날짜 =====
 def get_effective_date():
     now = datetime.now()
-    target = now - timedelta(days=1) if now.hour < 16 else now
+    target = now - timedelta(days=1) if now.hour < 9 else now
     while target.weekday() >= 5:
         target -= timedelta(days=1)
     return target
