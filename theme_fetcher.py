@@ -1,16 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-네이버 금융에서 종목별 '테마 + 섹터(업종)'를 best-effort로 수집해 캐시한다.
+네이버 금융 종목 페이지에서 '업종(섹터) + 테마'를 best-effort로 수집·캐시한다.
 
-핵심 설계(타임아웃 방지):
-- 실행당 '신규 네트워크 호출 수'를 max_new로 제한(예산제). 한 번에 다 받지 않는다.
-- 예산은 한 프로세스(코스피+코스닥) 전체에서 공유된다.
-- 빈 결과는 캐시에 저장하지 않는다 -> 다음 실행에서 다시 시도(7일 묶임 방지).
-- 짧은 타임아웃(모바일 4s, 데스크톱 5s)으로 느린 응답에 묶이지 않는다.
-- 캐시는 data/theme_cache.json. 갱신 주기 CACHE_TTL_DAYS.
+v2 변경(숫자 표기 버그 수정):
+- 모바일 통합 API는 테마 자리에 숫자 코드를 반환해 제거. 데스크톱 종목 페이지의
+  업종/테마 '링크 텍스트'(한글)만 사용한다.
+- 강력 필터: 한글/영문자가 없는 값(숫자·기호만)은 절대 채택하지 않는다.
+  -> 어떤 경우에도 "278" 같은 숫자가 칩으로 표시되지 않는다.
+- 캐시 스키마 버전(SCHEMA)으로 구버전(숫자 포함) 캐시는 자동 무효화·재수집.
+- 읽는 시점에도 한 번 더 필터링하므로, 이미 저장된 숫자는 화면에 나오지 않는다.
 
-cache: { "000660": {"sector":"반도체","themes":["AI","HBM"],"ts":...}, ... }
+실행당 신규 네트워크 호출은 max_new로 제한(코스피+코스닥 합산). 빈 결과는 저장 안 함.
+cache: data/theme_cache.json
+  { "000660": {"sector":"반도체","themes":["AI","HBM"],"ts":...,"v":2}, ... }
 """
+import re
 import json
 import time
 from datetime import datetime
@@ -23,14 +27,13 @@ except ImportError:
     requests = None
     BeautifulSoup = None
 
-CACHE_TTL_DAYS = 14         # 테마/섹터는 자주 안 바뀐다
+SCHEMA = 2
+CACHE_TTL_DAYS = 14
 MAX_THEMES = 3
 THROTTLE_SEC = 0.15
-TIMEOUT_MOBILE = 4
-TIMEOUT_DESKTOP = 5
+TIMEOUT = 5
 
-# 한 프로세스(코스피+코스닥) 동안 공유되는 신규 호출 카운터
-_run_attempts = 0
+_run_attempts = 0   # 한 프로세스(코스피+코스닥) 공유 신규호출 카운터
 
 _HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -39,7 +42,8 @@ _HEADERS = {
     "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
     "Referer": "https://finance.naver.com/",
 }
-_JSON_HEADERS = dict(_HEADERS, **{"Accept": "application/json"})
+
+_HANGUL = re.compile(r"[가-힣]")
 
 
 def reset_budget():
@@ -49,6 +53,31 @@ def reset_budget():
 
 def _now_ts():
     return datetime.now().timestamp()
+
+
+def _clean(s):
+    return (s or "").replace("\xa0", " ").strip()
+
+
+def _is_name(s):
+    """업종/테마로 인정할 값인가. 숫자·기호만이면 거부, 한글/영문자 포함 + 길이 2~20."""
+    s = _clean(s)
+    if not (2 <= len(s) <= 20):
+        return False
+    stripped = re.sub(r"[\d\s,.\-+%()]", "", s)
+    if not stripped:                       # 숫자/기호만 남으면 거부
+        return False
+    return bool(_HANGUL.search(s)) or any(c.isalpha() for c in s)
+
+
+def _sanitize(sector, themes):
+    sector = sector if _is_name(sector) else ""
+    clean = []
+    for t in (themes or []):
+        t = _clean(t)
+        if _is_name(t) and t not in clean and t != sector:
+            clean.append(t)
+    return sector, clean[:MAX_THEMES]
 
 
 def _load_cache(path: Path):
@@ -65,93 +94,27 @@ def _save_cache(path: Path, cache: dict):
         print(f"[!] theme_cache 저장 실패: {e}")
 
 
-def _clean(s):
-    return (s or "").replace("\xa0", " ").strip()
-
-
-def _walk_for_keys(obj, key_substrings):
-    found = []
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            if any(sub in str(k).lower() for sub in key_substrings):
-                found.append(v)
-            found.extend(_walk_for_keys(v, key_substrings))
-    elif isinstance(obj, list):
-        for it in obj:
-            found.extend(_walk_for_keys(it, key_substrings))
-    return found
-
-
-def _fetch_mobile(code):
-    url = f"https://m.stock.naver.com/api/stock/{code}/integration"
-    r = requests.get(url, headers=_JSON_HEADERS, timeout=TIMEOUT_MOBILE)
-    r.raise_for_status()
-    data = r.json()
-    sector = ""
-    for v in _walk_for_keys(data, ("industrygroupkor", "industryname", "upjong")):
-        if isinstance(v, str) and v.strip():
-            sector = _clean(v); break
-    if not sector:
-        for v in _walk_for_keys(data, ("industry",)):
-            if isinstance(v, str) and v.strip():
-                sector = _clean(v); break
-    themes = []
-    for v in _walk_for_keys(data, ("theme",)):
-        if isinstance(v, list):
-            for it in v:
-                if isinstance(it, dict):
-                    nm = it.get("themeName") or it.get("name") or it.get("nameKor")
-                    if nm:
-                        themes.append(_clean(nm))
-                elif isinstance(it, str):
-                    themes.append(_clean(it))
-        elif isinstance(v, str) and v.strip():
-            themes.append(_clean(v))
-    themes = list(dict.fromkeys([t for t in themes if t]))
-    return sector, themes
-
-
 def _fetch_desktop(code):
+    """데스크톱 종목 페이지에서 업종(type=upjong)·테마(type=theme) 링크 텍스트 추출."""
     url = f"https://finance.naver.com/item/main.naver?code={code}"
-    r = requests.get(url, headers=_HEADERS, timeout=TIMEOUT_DESKTOP)
+    r = requests.get(url, headers=_HEADERS, timeout=TIMEOUT)
     r.raise_for_status()
     r.encoding = "euc-kr"
     soup = BeautifulSoup(r.text, "html.parser")
     sector, themes = "", []
     for a in soup.find_all("a", href=True):
-        href, txt = a["href"], _clean(a.get_text())
-        if not txt:
+        href = a["href"]
+        if "sise_group_detail" not in href:
             continue
-        if "sise_group_detail" in href and "type=upjong" in href and not sector:
+        txt = _clean(a.get_text())
+        if "type=upjong" in href and not sector and _is_name(txt):
             sector = txt
-        elif "sise_group_detail" in href and "type=theme" in href:
+        elif "type=theme" in href and _is_name(txt):
             themes.append(txt)
-    themes = list(dict.fromkeys([t for t in themes if t]))
-    return sector, themes
-
-
-def _do_fetch(code):
-    """네트워크 시도 1회분. (sector, themes) 반환, 실패 시 ('', [])."""
-    sector, themes = "", []
-    for fetcher in (_fetch_mobile, _fetch_desktop):
-        try:
-            s, t = fetcher(code)
-            sector = sector or s
-            if t and not themes:
-                themes = t
-            if sector and themes:
-                break
-        except Exception:
-            continue
-    return sector, themes[:MAX_THEMES]
+    return _sanitize(sector, themes)
 
 
 def enrich(tickers, cache_path: Path, progress=None, max_new=0):
-    """
-    tickers의 테마/섹터 맵을 만든다.
-    max_new>0 이면 이 프로세스 전체에서 신규 네트워크 시도를 max_new회로 제한.
-    빈 결과는 저장하지 않아 다음 실행에서 재시도된다.
-    """
     global _run_attempts
     cache = _load_cache(cache_path)
     total = len(tickers)
@@ -159,13 +122,18 @@ def enrich(tickers, cache_path: Path, progress=None, max_new=0):
     for i, t in enumerate(tickers, 1):
         code = str(t).zfill(6)
         entry = cache.get(code)
-        fresh = entry and (_now_ts() - entry.get("ts", 0) < CACHE_TTL_DAYS * 86400)
+        fresh = (entry and entry.get("v") == SCHEMA
+                 and _now_ts() - entry.get("ts", 0) < CACHE_TTL_DAYS * 86400)
         budget_left = (max_new <= 0) or (_run_attempts < max_new)
         if not fresh and budget_left and requests is not None:
             _run_attempts += 1
-            sector, themes = _do_fetch(code)
-            if sector or themes:           # 성공한 것만 캐시
-                cache[code] = {"sector": sector, "themes": themes, "ts": _now_ts()}
+            try:
+                sector, themes = _fetch_desktop(code)
+            except Exception:
+                sector, themes = "", []
+            if sector or themes:                       # 성공한 것만 저장
+                cache[code] = {"sector": sector, "themes": themes,
+                               "ts": _now_ts(), "v": SCHEMA}
                 new_ok += 1
             time.sleep(THROTTLE_SEC)
         if progress:
@@ -173,7 +141,12 @@ def enrich(tickers, cache_path: Path, progress=None, max_new=0):
     _save_cache(cache_path, cache)
     print(f"[+] 테마/섹터: 신규 수집 {new_ok}건 (누적 시도 {_run_attempts}"
           + (f"/{max_new}" if max_new > 0 else "") + ")")
-    return {str(t).zfill(6): {
-                "sector": cache.get(str(t).zfill(6), {}).get("sector", ""),
-                "themes": cache.get(str(t).zfill(6), {}).get("themes", [])}
-            for t in tickers}
+
+    # 읽는 시점에도 필터링 (구버전 캐시의 숫자 잔재가 화면에 나오지 않도록)
+    out = {}
+    for t in tickers:
+        code = str(t).zfill(6)
+        e = cache.get(code, {})
+        sector, themes = _sanitize(e.get("sector", ""), e.get("themes", []))
+        out[code] = {"sector": sector, "themes": themes}
+    return out
