@@ -12,6 +12,7 @@ KOSPI / KOSDAQ 일일 모니터링 v4.0
 """
 import sys
 import time
+import json
 import webbrowser
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -60,6 +61,11 @@ MARKETS = [("KOSPI", 0, "코스피"), ("KOSDAQ", 1, "코스닥")]
 ANCHOR_PCT = 6.0          # 기준봉: 전일 종가 대비 등락률 +6% 이상
 PAGES_PER_MARKET = 5      # 페이지당 50종목 -> 250 수집 후 상위 200
 DEMO = os.environ.get("KM_DEMO") == "1"   # 네트워크 없이 샘플로 렌더 검증
+
+# 실행당 신규 호출 예산 (0 = 무제한, 로컬 기본). CI에서는 워크플로가 env로 지정.
+THEME_MAX_NEW = int(os.environ.get("THEME_MAX_NEW", "0") or "0")
+DART_MAX_NEW = int(os.environ.get("DART_MAX_NEW", "0") or "0")
+_DART_NEW_USED = 0   # 코스피+코스닥 합산
 
 NAVER_URL = "https://finance.naver.com/sise/sise_market_sum.naver"
 HEADERS = {
@@ -184,6 +190,35 @@ def fetch_naver_market_data(sosok, market_key):
 
 
 # ===== DART 자동 점수 =====
+def _dart_split(tickers):
+    """fin_cache 기준으로 (이미 받은 티커, 신규 티커) 분리. 신규만 예산 적용."""
+    try:
+        corp_map = dart_scorer.load_corp_codes()
+    except Exception:
+        corp_map = {}
+    yr = datetime.now().year
+    cache_ver = getattr(dart_scorer, "CACHE_VERSION", None)
+    cache_dir = getattr(dart_scorer, "CACHE_DIR", None)
+    warm, cold = [], []
+    for t in tickers:
+        t6 = str(t).zfill(6)
+        info = corp_map.get(t6)
+        cc = info.get("corp_code") if isinstance(info, dict) else None
+        ok = False
+        if cc and cache_dir:
+            for y in (yr - 1, yr - 2, yr - 3):
+                f = cache_dir / f"{cc}_{y}.json"
+                if f.exists():
+                    try:
+                        if json.loads(f.read_text(encoding="utf-8")).get("_v") == cache_ver:
+                            ok = True
+                            break
+                    except Exception:
+                        pass
+        (warm if ok else cold).append(t)
+    return warm, cold
+
+
 def add_dart_scores(df, label=""):
     if not DART_AVAILABLE:
         df["자동점수"] = None
@@ -197,8 +232,24 @@ def add_dart_scores(df, label=""):
         return df, "no_api_key"
 
     print(f"[*] {label} DART 자동 점수 계산 중... (캐시 사용)")
-    tickers = df["티커"].tolist()
+    all_tickers = df["티커"].tolist()
     per_map = dict(zip(df["티커"], df["PER"]))
+
+    # 신규(콜드) 종목은 실행당 예산만큼만 채점하고 나머지는 다음 실행으로 이월
+    global _DART_NEW_USED
+    if DART_MAX_NEW > 0:
+        warm, cold = _dart_split(all_tickers)
+        remaining = max(0, DART_MAX_NEW - _DART_NEW_USED)
+        take = cold[:remaining]
+        _DART_NEW_USED += len(take)
+        tickers = warm + take
+        deferred = len(cold) - len(take)
+        if deferred > 0:
+            print(f"    [{label}] 캐시 {len(warm)} + 신규 {len(take)} 채점 / "
+                  f"{deferred}개는 다음 실행으로 이월(예산 {DART_MAX_NEW})")
+    else:
+        tickers = all_tickers
+
     last_progress = [time.time()]
 
     def progress(i, total, ticker):
@@ -245,7 +296,8 @@ def add_themes(df):
                 print(f"    [테마 {i}/{total}] {code}...", flush=True)
                 last[0] = time.time()
 
-        tmap = theme_fetcher.enrich(df["티커"].tolist(), THEME_CACHE, progress)
+        tmap = theme_fetcher.enrich(df["티커"].tolist(), THEME_CACHE,
+                                    progress, max_new=THEME_MAX_NEW)
         df["테마"] = df["티커"].map(lambda t: tmap.get(str(t).zfill(6), {}).get("themes", []))
         df["섹터"] = df["티커"].map(lambda t: tmap.get(str(t).zfill(6), {}).get("sector", ""))
     except Exception as e:
@@ -928,6 +980,14 @@ def main():
     eff_date = get_effective_date()
     date_str = fmt(eff_date)
     print(f"[*] 기준일: {date_str}")
+
+    global _DART_NEW_USED
+    _DART_NEW_USED = 0
+    if THEME_AVAILABLE:
+        theme_fetcher.reset_budget()
+    if THEME_MAX_NEW or DART_MAX_NEW:
+        print(f"[*] 예산제: 테마 신규 {THEME_MAX_NEW or '무제한'} / "
+              f"DART 신규 {DART_MAX_NEW or '무제한'} (실행당)")
 
     payloads = []
     for market_key, sosok, label in MARKETS:
