@@ -58,11 +58,13 @@ jobs:
           fi
 
       - name: Run KOSPI / KOSDAQ monitor
-        timeout-minutes: 40
+        timeout-minutes: 30
         env:
           DART_API_KEY: ${{ secrets.DART_API_KEY }}
           CI: "true"
           PYTHONUNBUFFERED: "1"
+          THEME_MAX_NEW: "120"
+          DART_MAX_NEW: "80"
         run: |
           echo "" | python kospi_check.py || true
 
@@ -70,7 +72,7 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add docs/
+          git add docs/ data/ fin_cache/ 2>/dev/null || git add docs/
           if git diff --cached --quiet; then
             echo "No changes to commit."
             exit 0
