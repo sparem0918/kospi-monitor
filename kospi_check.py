@@ -14,7 +14,14 @@ import sys
 import time
 import json
 import webbrowser
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+KST = timezone(timedelta(hours=9))
+
+
+def now_kst():
+    """한국시간(KST). GitHub Actions(UTC)에서도 항상 KST로 표기/판정."""
+    return datetime.now(KST)
 from pathlib import Path
 
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
@@ -79,7 +86,7 @@ HEADERS = {
 
 # ===== 날짜 =====
 def get_effective_date():
-    now = datetime.now()
+    now = now_kst()
     target = now - timedelta(days=1) if now.hour < 9 else now
     while target.weekday() >= 5:
         target -= timedelta(days=1)
@@ -196,7 +203,7 @@ def _dart_split(tickers):
         corp_map = dart_scorer.load_corp_codes()
     except Exception:
         corp_map = {}
-    yr = datetime.now().year
+    yr = now_kst().year
     cache_ver = getattr(dart_scorer, "CACHE_VERSION", None)
     cache_dir = getattr(dart_scorer, "CACHE_DIR", None)
     warm, cold = [], []
@@ -839,7 +846,7 @@ border-radius:8px;text-align:center;font-size:13px;border:1px solid var(--line);
     <h1>📊 KOSPI · KOSDAQ Monitor</h1>
     <div class="source">Naver Finance · DART OpenAPI · 시총 상위 {TOP_N}</div>
   </div>
-  <div class="date">기준일: <b>{pretty_date}</b><br>{datetime.now():%Y-%m-%d %H:%M} 생성</div>
+  <div class="date">기준일: <b>{pretty_date}</b><br>{now_kst():%Y-%m-%d %H:%M} KST 생성</div>
 </div>
 
 {dart_notice}
